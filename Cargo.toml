@@ -1,0 +1,14 @@
+[package]
+name = "gtk-rs-animation"
+version = "0.1.0"
+authors = ["iovxw <iovxw@outlook.com>"]
+
+[dependencies]
+gtk-animator = { path="gtk-animator" }
+
+gtk = "0.1"
+# ⬇ versions specified by gtk
+gtk-sys = "*"
+gdk = "*"
+glib = "*"
+cairo-rs = "*"
