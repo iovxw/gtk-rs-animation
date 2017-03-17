@@ -1,6 +1,7 @@
 extern crate gtk;
 
-use std::cell::Cell;
+use std::mem;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Instant, Duration, SystemTime};
 
@@ -8,34 +9,88 @@ use gtk::prelude::*;
 
 const MAX_FPS: u32 = 60;
 
+pub enum Repeat {
+    Count(u32),
+    Indefinite,
+    Function(Box<Fn() -> bool>),
+}
+
+impl Repeat {
+    pub fn function<F>(f: F) -> Repeat
+        where F: Fn() -> bool + 'static
+    {
+        Repeat::Function(Box::new(f))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AnimatorState {
+enum State {
     Running,
     Paused,
     Stoped,
 }
 
-impl AnimatorState {
+impl State {
     fn is_running(&self) -> bool {
         match *self {
-            AnimatorState::Running => true,
+            State::Running => true,
             _ => false,
         }
     }
 }
 
 struct AnimatorInner {
-    duration: Cell<Duration>,
-    started_time: Cell<SystemTime>,
-    running_time: Cell<Duration>,
-    state: Cell<AnimatorState>,
-    reverse: Cell<bool>,
+    duration: Duration,
+    started_time: SystemTime,
+    running_time: Duration,
+    state: State,
+    reverse: bool,
     progress: Box<Fn(f64, f64)>,
     easing: Box<Fn(f64) -> f64>,
+    repeat: Repeat,
+}
+
+impl AnimatorInner {
+    fn is_running(&self) -> bool {
+        self.state.is_running()
+    }
+
+    fn is_reversing(&self) -> bool {
+        self.reverse
+    }
+
+    fn reset(&mut self) {
+        self.state = State::Stoped;
+        self.running_time = Duration::from_millis(0);
+        let p = if self.is_reversing() { 1.0 } else { 0.0 };
+        (self.progress)((self.easing)(p), p);
+    }
+
+    fn finish(&mut self) {
+        self.state = State::Stoped;
+        self.running_time = self.duration;
+        let p = if self.is_reversing() { 0.0 } else { 1.0 };
+        (self.progress)((self.easing)(p), p);
+    }
+
+    fn continue_repeat(&mut self) -> bool {
+        match self.repeat {
+            Repeat::Count(ref mut n) => {
+                if *n == 0 {
+                    // animator is restart manually
+                    return false;
+                }
+                *n -= 1;
+                if *n == 0 { false } else { true }
+            }
+            Repeat::Indefinite => false,
+            Repeat::Function(ref f) => f(),
+        }
+    }
 }
 
 pub struct Animator {
-    inner: Rc<AnimatorInner>,
+    inner: Rc<RefCell<AnimatorInner>>,
 }
 
 // Must implement `Clone` manually, see:
@@ -47,87 +102,82 @@ impl Clone for Animator {
 }
 
 impl Animator {
-    pub fn new<P, E>(duration: Duration, progress: P, easing: E) -> Animator
+    pub fn new<P, E>(duration: Duration, repeat: Repeat, progress: P, easing: E) -> Animator
         where P: Fn(f64, f64) + 'static,
               E: Fn(f64) -> f64 + 'static
     {
         Animator {
-            inner: Rc::new(AnimatorInner {
-                duration: Cell::new(duration),
-                started_time: Cell::new(SystemTime::now()),
-                running_time: Cell::new(Duration::from_millis(0)),
-                state: Cell::new(AnimatorState::Stoped),
-                reverse: Cell::new(false),
+            inner: Rc::new(RefCell::new(AnimatorInner {
+                duration: duration,
+                started_time: SystemTime::now(),
+                running_time: Duration::from_millis(0),
+                state: State::Stoped,
+                reverse: false,
                 progress: Box::new(progress),
                 easing: Box::new(easing),
-            }),
+                repeat: repeat,
+            })),
         }
     }
 
     pub fn start(&self) {
-        if !self.is_running() {
-            self.inner.started_time.set(SystemTime::now() - self.inner.running_time.get());
+        let mut animator = self.inner.borrow_mut();
+        if !animator.is_running() {
+            animator.started_time = SystemTime::now() - animator.running_time;
 
+            mem::drop(animator);
             self.start_inner();
         }
     }
 
     pub fn pause(&self) {
-        if self.is_running() {
-            self.inner.state.set(AnimatorState::Paused);
+        let mut animator = self.inner.borrow_mut();
+        if animator.is_running() {
+            animator.state = State::Paused;
         }
     }
 
+    pub fn set_repeat(&self, repeat: Repeat) {
+        self.inner.borrow_mut().repeat = repeat;
+    }
+
+    pub fn reset(&self) {
+        self.inner.borrow_mut().reset()
+    }
+
+    pub fn finish(&self) {
+        self.inner.borrow_mut().finish()
+    }
+
     pub fn reverse(&self, on: bool) {
-        if on != self.is_reversing() {
+        if on != self.inner.borrow().is_reversing() {
             let mut need_start = false;
-            if self.is_running() {
+            if self.inner.borrow().is_running() {
                 self.pause();
                 need_start = true;
             }
-            self.inner.reverse.set(on);
-            let t = self.inner.running_time.get();
-            let d = self.inner.duration.get();
-            self.inner.running_time.set(d - t);
+            let mut animator = self.inner.borrow_mut();
+            animator.reverse = on;
+            animator.running_time = animator.duration - animator.running_time;
+            mem::drop(animator);
             if need_start {
                 self.start();
             }
         }
     }
 
-    pub fn is_running(&self) -> bool {
-        self.inner.state.get().is_running()
-    }
-
-    pub fn is_reversing(&self) -> bool {
-        self.inner.reverse.get()
-    }
-
-    pub fn reset(&self) {
-        self.inner.state.set(AnimatorState::Stoped);
-        self.inner.running_time.set(Duration::from_millis(0));
-        let p = if self.is_reversing() { 1.0 } else { 0.0 };
-        (self.inner.progress)((self.inner.easing)(p), p);
-    }
-
-    pub fn finish(&self) {
-        self.inner.state.set(AnimatorState::Stoped);
-        self.inner.running_time.set(self.inner.duration.get());
-        let p = if self.is_reversing() { 0.0 } else { 1.0 };
-        (self.inner.progress)((self.inner.easing)(p), p);
-    }
-
     pub fn start_inner(&self) {
-        self.inner.state.set(AnimatorState::Running);
+        self.inner.borrow_mut().state = State::Running;
 
         let mut fps_time = Instant::now();
-        let animator = self.clone();
+        let s = self.clone();
 
         let mut fps_counter = 0;
         let mut fps_sec = Instant::now();
 
         gtk::timeout_add(1, move || {
-            if !animator.inner.state.get().is_running() {
+            let mut animator = s.inner.borrow_mut();
+            if !animator.is_running() {
                 return Continue(false);
             }
             if fps_time.elapsed().subsec_nanos() < 1_000_000_000 / MAX_FPS {
@@ -143,33 +193,42 @@ impl Animator {
                 }
             }
 
-            let inner = &animator.inner;
-            let running_time = (SystemTime::now() - inner.started_time.get().elapsed().unwrap())
+            let running_time = (SystemTime::now() - animator.started_time.elapsed().unwrap())
                 .elapsed()
                 .unwrap();
-            inner.running_time.set(running_time);
-            let p = to_millisecond(running_time) as f64 /
-                    to_millisecond(inner.duration.get()) as f64;
-            let p = if inner.reverse.get() { 1.0 - p } else { p };
+            animator.running_time = running_time;
+            let p = to_millisecond(running_time) as f64 / to_millisecond(animator.duration) as f64;
+            let p = if animator.reverse { 1.0 - p } else { p };
             let continue_animation;
 
             if p >= 0.0 && p < 1.0 {
                 continue_animation = true;
-                (inner.progress)((inner.easing)(p), p);
+                (animator.progress)((animator.easing)(p), p);
+                mem::drop(animator);
             } else {
-                // FIXME: need a event or callback to set `continue_animation`
-                continue_animation = false;
+                continue_animation = animator.continue_repeat();
 
                 if !continue_animation {
                     animator.finish();
+                    mem::drop(animator);
                 } else {
-                    animator.inner.started_time.set(SystemTime::now());
+                    animator.started_time = SystemTime::now();
                     animator.reset();
+                    mem::drop(animator);
+                    s.start();
                 }
             }
 
-            Continue(continue_animation && inner.state.get().is_running())
+            Continue(continue_animation && s.inner.borrow().is_running())
         });
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.inner.borrow().state.is_running()
+    }
+
+    pub fn is_reversing(&self) -> bool {
+        self.inner.borrow().reverse
     }
 }
 

@@ -45,6 +45,10 @@ fn main() {
         Inhibit(false)
     });
     let ball_animator = gtk_animator::Animator::new(Duration::from_secs(5),
+                                                    gtk_animator::Repeat::function(|| {
+                                                        println!("repeat!");
+                                                        true
+                                                    }),
                                                     {
                                                         let layout = layout.clone();
                                                         let ball = ball.clone();
