@@ -1,3 +1,5 @@
+#![feature(conservative_impl_trait)]
+
 extern crate gtk;
 
 use std::mem;
@@ -6,6 +8,11 @@ use std::rc::Rc;
 use std::time::{Instant, Duration, SystemTime};
 
 use gtk::prelude::*;
+
+mod then;
+mod and_then;
+pub use then::Then;
+pub use and_then::AndThen;
 
 const MAX_FPS: u32 = 60;
 
@@ -51,6 +58,8 @@ struct AnimatorInner {
     progress: Box<Fn(f64, f64)>,
     easing: Box<Fn(f64) -> f64>,
     repeat: Repeat,
+    then: Option<Box<Fn()>>,
+    and_then: Option<Box<Fn() -> Animator>>,
 }
 
 impl AnimatorInner {
@@ -92,6 +101,31 @@ impl AnimatorInner {
     }
 }
 
+pub trait Animate {
+    fn start(&self);
+    fn pause(&self);
+    fn set_repeat(&self, repeat: Repeat);
+    fn reset(&self);
+    fn finish(&self);
+    fn reverse(&self, on: bool);
+    fn is_running(&self) -> bool;
+    fn is_reversing(&self) -> bool;
+    fn one_frame(&self) -> bool;
+    fn then<F>(self, f: F) -> Then<Self, F>
+        where F: Fn() + 'static,
+              Self: Sized
+    {
+        Then::new(self, f)
+    }
+    fn and_then<F, B>(self, f: F) -> AndThen<Self, B, F>
+        where F: Fn() -> B + 'static,
+              B: Animate,
+              Self: Sized
+    {
+        AndThen::new(self, f)
+    }
+}
+
 pub struct Animator {
     inner: Rc<RefCell<AnimatorInner>>,
 }
@@ -122,11 +156,15 @@ impl Animator {
                 progress: Box::new(progress),
                 easing: Box::new(easing),
                 repeat: repeat,
+                then: None,
+                and_then: None,
             })),
         }
     }
+}
 
-    pub fn start(&self) {
+impl Animate for Animator {
+    fn start(&self) {
         let mut animator = self.inner.borrow_mut();
         if !animator.is_running() {
             animator.started_time = SystemTime::now() - animator.running_time;
@@ -152,31 +190,40 @@ impl Animator {
                     }
                 }
                 mem::drop(animator);
-                Continue(s.one_frame())
+                let c = s.one_frame();
+                if !c {
+                    for f in &s.inner.borrow().then {
+                        f();
+                    }
+                    for f in &s.inner.borrow().and_then {
+                        f();
+                    }
+                }
+                Continue(c)
             });
         }
     }
 
-    pub fn pause(&self) {
+    fn pause(&self) {
         let mut animator = self.inner.borrow_mut();
         if animator.is_running() {
             animator.state = State::Paused;
         }
     }
 
-    pub fn set_repeat(&self, repeat: Repeat) {
+    fn set_repeat(&self, repeat: Repeat) {
         self.inner.borrow_mut().repeat = repeat;
     }
 
-    pub fn reset(&self) {
+    fn reset(&self) {
         self.inner.borrow_mut().reset()
     }
 
-    pub fn finish(&self) {
+    fn finish(&self) {
         self.inner.borrow_mut().finish()
     }
 
-    pub fn reverse(&self, on: bool) {
+    fn reverse(&self, on: bool) {
         if on != self.inner.borrow().is_reversing() {
             let mut need_start = false;
             if self.inner.borrow().is_running() {
@@ -193,7 +240,15 @@ impl Animator {
         }
     }
 
-    pub fn one_frame(&self) -> bool {
+    fn is_running(&self) -> bool {
+        self.inner.borrow().state.is_running()
+    }
+
+    fn is_reversing(&self) -> bool {
+        self.inner.borrow().reverse
+    }
+
+    fn one_frame(&self) -> bool {
         if !self.is_running() {
             return false;
         }
@@ -226,14 +281,6 @@ impl Animator {
         }
 
         continue_animation && self.inner.borrow().is_running()
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.inner.borrow().state.is_running()
-    }
-
-    pub fn is_reversing(&self) -> bool {
-        self.inner.borrow().reverse
     }
 }
 

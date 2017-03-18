@@ -8,6 +8,7 @@ extern crate gtk_animator;
 use std::time::Duration;
 
 use gtk::prelude::*;
+use gtk_animator::Animate;
 
 const WINDOW_WIDTH: i32 = 400;
 const WINDOW_HEIGHT: i32 = 400;
