@@ -45,6 +45,9 @@ struct AnimatorInner {
     running_time: Duration,
     state: State,
     reverse: bool,
+    fps_instant: Instant,
+    fps_counter: u32,
+    fps_second: Instant,
     progress: Box<Fn(f64, f64)>,
     easing: Box<Fn(f64) -> f64>,
     repeat: Repeat,
@@ -113,6 +116,9 @@ impl Animator {
                 running_time: Duration::from_millis(0),
                 state: State::Stoped,
                 reverse: false,
+                fps_instant: Instant::now(),
+                fps_counter: 0,
+                fps_second: Instant::now(),
                 progress: Box::new(progress),
                 easing: Box::new(easing),
                 repeat: repeat,
@@ -124,9 +130,30 @@ impl Animator {
         let mut animator = self.inner.borrow_mut();
         if !animator.is_running() {
             animator.started_time = SystemTime::now() - animator.running_time;
+            animator.fps_instant = Instant::now();
+            animator.fps_counter = 0;
+            animator.fps_second = Instant::now();
+            animator.state = State::Running;
 
             mem::drop(animator);
-            self.start_inner();
+            let s = self.clone();
+            gtk::timeout_add(1, move || {
+                let mut animator = s.inner.borrow_mut();
+                if animator.fps_instant.elapsed().subsec_nanos() < 1_000_000_000 / MAX_FPS {
+                    return Continue(true);
+                } else {
+                    animator.fps_instant = Instant::now();
+
+                    animator.fps_counter += 1;
+                    if animator.fps_second.elapsed().as_secs() > 0 {
+                        println!("fps: {}", animator.fps_counter);
+                        animator.fps_counter = 0;
+                        animator.fps_second = Instant::now();
+                    }
+                }
+                mem::drop(animator);
+                Continue(s.one_frame())
+            });
         }
     }
 
@@ -166,61 +193,39 @@ impl Animator {
         }
     }
 
-    pub fn start_inner(&self) {
-        self.inner.borrow_mut().state = State::Running;
+    pub fn one_frame(&self) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+        let mut animator = self.inner.borrow_mut();
 
-        let mut fps_time = Instant::now();
-        let s = self.clone();
+        let running_time = (SystemTime::now() - animator.started_time.elapsed().unwrap())
+            .elapsed()
+            .unwrap();
+        animator.running_time = running_time;
+        let p = to_millisecond(running_time) as f64 / to_millisecond(animator.duration) as f64;
+        let p = if animator.reverse { 1.0 - p } else { p };
+        let continue_animation;
 
-        let mut fps_counter = 0;
-        let mut fps_sec = Instant::now();
+        if p >= 0.0 && p < 1.0 {
+            continue_animation = true;
+            (animator.progress)((animator.easing)(p), p);
+            mem::drop(animator);
+        } else {
+            continue_animation = animator.continue_repeat();
 
-        gtk::timeout_add(1, move || {
-            let mut animator = s.inner.borrow_mut();
-            if !animator.is_running() {
-                return Continue(false);
-            }
-            if fps_time.elapsed().subsec_nanos() < 1_000_000_000 / MAX_FPS {
-                return Continue(true);
-            } else {
-                fps_time = Instant::now();
-
-                fps_counter += 1;
-                if fps_sec.elapsed().as_secs() > 0 {
-                    println!("fps: {}", fps_counter);
-                    fps_counter = 0;
-                    fps_sec = Instant::now();
-                }
-            }
-
-            let running_time = (SystemTime::now() - animator.started_time.elapsed().unwrap())
-                .elapsed()
-                .unwrap();
-            animator.running_time = running_time;
-            let p = to_millisecond(running_time) as f64 / to_millisecond(animator.duration) as f64;
-            let p = if animator.reverse { 1.0 - p } else { p };
-            let continue_animation;
-
-            if p >= 0.0 && p < 1.0 {
-                continue_animation = true;
-                (animator.progress)((animator.easing)(p), p);
+            if !continue_animation {
+                animator.finish();
                 mem::drop(animator);
             } else {
-                continue_animation = animator.continue_repeat();
-
-                if !continue_animation {
-                    animator.finish();
-                    mem::drop(animator);
-                } else {
-                    animator.started_time = SystemTime::now();
-                    animator.reset();
-                    mem::drop(animator);
-                    s.start();
-                }
+                animator.started_time = SystemTime::now();
+                animator.reset();
+                mem::drop(animator);
+                self.start();
             }
+        }
 
-            Continue(continue_animation && s.inner.borrow().is_running())
-        });
+        continue_animation && self.inner.borrow().is_running()
     }
 
     pub fn is_running(&self) -> bool {
