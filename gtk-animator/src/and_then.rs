@@ -1,72 +1,69 @@
-use std::cell::RefCell;
+use std::rc::Rc;
+use std::cell::RefMut;
 
-use super::Repeat;
-use super::Animate;
+use std::cell::Cell;
 
-pub struct AndThen<A, B, F>
-    where A: Animate,
-          B: Animate,
-          F: Fn() -> B + 'static
-{
+use super::*;
+
+pub struct AndThenInner<A, B> {
     animator: A,
-    and_then: F,
-    and_then_animator: RefCell<Option<B>>,
+    and_then: B,
+    then: Cell<bool>,
 }
 
-impl<A, B, F> AndThen<A, B, F>
+pub struct AndThen<A, B> {
+    inner: Rc<AndThenInner<A, B>>,
+}
+
+impl<A, B> Clone for AndThen<A, B> {
+    fn clone(&self) -> Self {
+        AndThen { inner: self.inner.clone() }
+    }
+}
+
+impl<A, B> AndThen<A, B>
     where A: Animate,
-          B: Animate,
-          F: Fn() -> B + 'static
+          B: Animate
 {
-    pub fn new(animate: A, and_then: F) -> AndThen<A, B, F> {
+    pub fn new(animate: A, and_then: B) -> AndThen<A, B> {
         AndThen {
-            animator: animate,
-            and_then: and_then,
-            and_then_animator: RefCell::new(None),
+            inner: Rc::new(AndThenInner {
+                animator: animate,
+                and_then: and_then,
+                then: Cell::new(false),
+            }),
         }
     }
 }
 
-impl<A, B, F> Animate for AndThen<A, B, F>
+impl<A, B> Animate for AndThen<A, B>
     where A: Animate,
           B: Animate,
-          F: Fn() -> B + 'static
 {
-    fn start(&self) {
-        self.animator.start();
-    }
-    fn pause(&self) {
-        self.animator.pause();
-    }
-    fn set_repeat(&self, repeat: Repeat) {
-        self.animator.set_repeat(repeat);
-    }
-    fn reset(&self) {
-        self.animator.reset();
-    }
     fn finish(&self) {
-        self.animator.finish();
+        self.inner.animator.finish();
     }
     fn reverse(&self, on: bool) {
-        self.animator.reverse(on);
+        self.inner.animator.reverse(on);
     }
-    fn is_running(&self) -> bool {
-        self.animator.is_running()
-    }
-    fn is_reversing(&self) -> bool {
-        self.animator.is_reversing()
+    fn get_state(&self) -> RefMut<State> {
+        if !self.inner.then.get() {
+            self.inner.animator.get_state()
+        } else {
+            self.inner.and_then.get_state()
+        }
     }
     fn one_frame(&self) -> bool {
-        if self.and_then_animator.borrow().is_none() {
-            let c = self.animator.one_frame();
+        if !self.inner.then.get() {
+            let c = self.inner.animator.one_frame();
             if !c {
-                *self.and_then_animator.borrow_mut() = Some((self.and_then)());
+                self.inner.then.set(true);
                 self.one_frame()
             } else {
                 c
             }
         } else {
-            self.and_then_animator.borrow().as_ref().unwrap().one_frame()
+            self.inner.and_then.one_frame()
         }
     }
 }
