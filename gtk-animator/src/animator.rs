@@ -56,7 +56,7 @@ impl Repeat {
         Repeat::Function(Box::new(f))
     }
 
-    fn shoud_continue(&mut self) -> bool {
+    pub fn shoud_continue(&mut self) -> bool {
         match *self {
             Repeat::Count(ref mut n, ref mut current) => {
                 if *current == 0 {
@@ -72,75 +72,99 @@ impl Repeat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Timer {
+pub enum TimerState {
     Running(Instant),
     Paused(Duration),
     Unstart,
-    Finish(Duration),
+    Finish,
+}
+
+pub struct Timer {
+    state: TimerState,
+    duration: Duration,
 }
 
 impl Timer {
-    pub fn new() -> Timer {
-        Timer::Unstart
+    pub fn new(duration: Duration) -> Timer {
+        Timer {
+            state: TimerState::Unstart,
+            duration: duration,
+        }
     }
 
     pub fn run(&mut self) {
-        match *self {
-            Timer::Paused(d) => {
-                *self = Timer::Running(Instant::now() - d);
+        match self.state {
+            TimerState::Paused(d) => {
+                self.state = TimerState::Running(Instant::now() - d);
             }
             _ => {
-                *self = Timer::Running(Instant::now());
+                self.state = TimerState::Running(Instant::now());
             }
         }
     }
 
     pub fn pause(&mut self) {
-        match *self {
-            Timer::Running(t) => {
-                *self = Timer::Paused(t.elapsed());
+        match self.state {
+            TimerState::Running(t) => {
+                self.state = TimerState::Paused(t.elapsed());
             }
             _ => (),
         }
     }
 
     pub fn reset(&mut self) {
-        *self = Timer::Unstart;
+        self.state = TimerState::Unstart;
     }
 
-    pub fn finish(&mut self, d: Duration) {
-        *self = Timer::Finish(d);
+    pub fn finish(&mut self) {
+        self.state = TimerState::Finish;
     }
 
-    pub fn reverse(&mut self, finish: Duration) {
-        match *self {
-            Timer::Paused(ref mut d) => {
-                *d = finish - *d;
+    pub fn reverse(&mut self) {
+        match self.state {
+            TimerState::Paused(ref mut d) => {
+                *d = self.duration - *d;
             }
-            Timer::Running(ref mut t) => {
-                *t = Instant::now() - (finish - t.elapsed());
+            TimerState::Running(ref mut t) => {
+                *t = Instant::now() - (self.duration - t.elapsed());
             }
-            Timer::Finish(_) => self.reset(),
-            Timer::Unstart => self.finish(finish),
+            TimerState::Finish => self.reset(),
+            TimerState::Unstart => self.finish(),
         }
     }
 
     pub fn restart(&mut self) {
-        *self = Timer::Running(Instant::now());
+        self.state = TimerState::Running(Instant::now());
     }
 
     pub fn get_duration(&self) -> Duration {
-        match *self {
-            Timer::Running(t) => t.elapsed(),
-            Timer::Paused(d) => d,
-            Timer::Unstart => Duration::from_secs(0),
-            Timer::Finish(d) => d,
+        match self.state {
+            TimerState::Running(t) => t.elapsed(),
+            TimerState::Paused(d) => d,
+            TimerState::Unstart => Duration::from_secs(0),
+            TimerState::Finish => self.duration,
         }
     }
 
+    pub fn get_target_duration(&self) -> Duration {
+        self.duration
+    }
+
+    pub fn get_rate(&self) -> f64 {
+        to_millisecond(self.get_duration()) as f64 /
+        to_millisecond(self.get_target_duration()) as f64
+    }
+
     pub fn is_running(&self) -> bool {
-        match *self {
-            Timer::Running(_) => true,
+        match self.state {
+            TimerState::Running(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_finished(&mut self) -> bool {
+        match self.state {
+            TimerState::Finish => true,
             _ => false,
         }
     }
@@ -154,9 +178,9 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(repeat: Repeat) -> State {
+    pub fn new(repeat: Repeat, duation: Duration) -> State {
         State {
-            timer: Timer::new(),
+            timer: Timer::new(duation),
             fps: FPS::new(MAX_FPS),
             repeat: repeat,
             reverse: false,
@@ -165,7 +189,6 @@ impl State {
 }
 
 struct AnimatorInner {
-    duration: Duration,
     state: Rc<RefCell<State>>,
     progress: Box<Fn(f64, f64)>,
     easing: Box<Fn(f64) -> f64>,
@@ -190,8 +213,7 @@ impl Animator {
     {
         Animator {
             inner: Rc::new(AnimatorInner {
-                duration: duration,
-                state: Rc::new(RefCell::new(State::new(repeat))),
+                state: Rc::new(RefCell::new(State::new(repeat, duration))),
                 progress: Box::new(progress),
                 easing: Box::new(easing),
             }),
@@ -204,45 +226,13 @@ impl Animate for Animator {
         self.inner.state.borrow_mut()
     }
 
-    fn one_frame(&self) -> bool {
+    fn one_frame(&self) {
         let animator = &self.inner;
 
-        let p = to_millisecond(self.get_state().timer.get_duration()) as f64 /
-                to_millisecond(animator.duration) as f64;
+        let p = self.get_state().timer.get_rate();
         let p = if self.get_state().reverse { 1.0 - p } else { p };
 
-        if p >= 0.0 && p <= 1.0 {
-            (animator.progress)((animator.easing)(p), p);
-            if !self.get_state().timer.is_running() {
-                false
-            } else {
-                true
-            }
-        } else {
-            if !self.get_state().repeat.shoud_continue() {
-                self.finish();
-                false
-            } else {
-                self.get_state().timer.restart();
-                true
-            }
-        }
-    }
-
-    fn finish(&self) {
-        if !self.is_running() {
-            self.get_state().timer.finish(self.inner.duration);
-            self.one_frame();
-        } else {
-            self.get_state().timer.finish(self.inner.duration);
-        }
-    }
-
-    fn reverse(&self, on: bool) {
-        if on != self.is_reversing() {
-            self.get_state().timer.reverse(self.inner.duration);
-            self.get_state().reverse = on;
-        }
+        (animator.progress)((animator.easing)(p), p);
     }
 }
 

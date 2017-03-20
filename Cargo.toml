@@ -3,6 +3,14 @@ name = "gtk-rs-animation"
 version = "0.1.0"
 authors = ["iovxw <iovxw@outlook.com>"]
 
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
+[[bin]]
+name = "queue"
+path = "src/queue.rs"
+
 [dependencies]
 gtk-animator = { path="gtk-animator" }
 
